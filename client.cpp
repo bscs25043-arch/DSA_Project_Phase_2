@@ -22,7 +22,7 @@
 #include <signal.h>
 #include <vector>
 #include <sys/socket.h>
-#include "helper.h"
+#include "helper.cpp"
 using namespace std;
 
 // ---- Constants ----
