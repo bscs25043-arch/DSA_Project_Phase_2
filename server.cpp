@@ -87,23 +87,22 @@ public:
     {
         return count;
     }
-    int32_t snapshot_into(T out[], int32_t maxLen)
+   int32_t snapshot_into(T out[], int32_t maxLen)
+{
+    int32_t copied = 0;
+
+    Node* curr = top;
+
+    while (curr != nullptr && copied < maxLen)
     {
-        int z = 0;
-        if (top != nullptr)
-        {
-            Node* Now_Node = top;
-            for (z; z != maxLen; z++)
-            {
-                out[z] = Now_Node->data;
-                if (Now_Node->next == nullptr)
-                    return z;
-                Now_Node = Now_Node->next;
-            }
-            return z;
-        }
-        throw std::out_of_range("Stack is Empty Already!!!\n");
+        out[copied] = curr->data;
+        copied++;
+
+        curr = curr->next;
     }
+
+    return copied;
+}
 };
 
 struct Snapshot;
@@ -113,6 +112,7 @@ struct TimelineNode
     TimelineNode* next;
     TimelineNode* prev;
 };
+
 class Timeline
 {
     TimelineNode* head, * tail;
@@ -135,17 +135,20 @@ public:
         temp->data = s;
         temp->next = nullptr;
         temp->prev = tail;
-        if (head == nullptr)
-        {
-            head = temp;
-            tail = temp;
-        }
-        else
-        {
-            tail->next = temp;
-            tail = temp;
-            stepCount = stepCount + 1;
-        }
+       if (head == nullptr)
+       {
+        head = temp;
+        head->prev = nullptr;
+        tail = temp;
+        tail->next = nullptr;
+       }
+else
+{
+    tail->next = temp;
+    tail = temp;
+}
+
+stepCount++;
     }
     TimelineNode* begin()
     {
@@ -276,9 +279,10 @@ bool validateProgram(const char* sourcePath)
         }
         if (kw == "func_end")
         {
-            if (groove < 0)
-                return false;
-            groove = groove - 1;
+           groove--;
+
+         if (groove < 0)
+          return false;
         }
     }
     if (groove != 0)
@@ -384,7 +388,20 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
                 fclose(out);
                 throw std::runtime_error("Call to undefined function: " + target);
             }
-            writeResolveRecord(out, targetOffset, line);
+            std::string patchedLine = "call " + std::to_string(targetOffset);
+            size_t secondSpace = line.find(' ');
+
+           if (secondSpace != std::string::npos)
+           {
+           secondSpace = line.find(' ', secondSpace + 1);
+
+            if (secondSpace != std::string::npos)
+            {
+             patchedLine += line.substr(secondSpace);
+             }
+}
+
+           writeResolveRecord(out, targetOffset, patchedLine);
         }
         else
         {
@@ -405,6 +422,16 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 }
 
 // PASS 0x2: EXECUTION (tokenization happens here)
+std::string getFunctionNameAtOffset(FILE* f, int64_t offset)
+{
+    fseek(f, offset, SEEK_SET);
+
+    std::string line;
+
+    readResolveRecord(f, line);
+
+    return secondWord(line);
+}
 enum TokenType
 {
     KEYWORD,
@@ -662,7 +689,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 int64_t targetOffset = std::stoll(tokens[1].text);
 
                 Frame New_Fr;
-                New_Fr.func_name = "func";
+                New_Fr.func_name = getFunctionNameAtOffset(f, targetOffset);
                 New_Fr.argc = 0;
                 New_Fr.localCount = 0;
                 New_Fr.returnLine = nextOffset;
@@ -773,7 +800,9 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     delete[] int_dexs;
     fclose(f);
 }
+
 // main section
+
 int32_t main()
 {
 
