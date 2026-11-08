@@ -86,21 +86,43 @@ struct DebugSession
 // PART A: TALKING TO THE LOAD BALANCER
 // =============================================================================================
 
-bool recvAll(int sock, char *buf, size_t n)
+bool recvAll(int sock,char* buffer,int totalBytes)
 {
-    // recv() can return fewer bytes than asked for, so keep calling it until exactly n bytes are read.
-    // Return false if the connection closes or fails before n bytes arrive.
+    int recved = 0;
+    while (recved < totalBytes)
+    {
+        int rez = recv( sock,buffer + rez,totalBytes - rez,0);
+
+        if (rez <= 0)
+        {
+            return false;
+        }
+
+        recved = recved +rez;
+    }
+
+    return true;
 }
-bool sendAll(int sock, const char *buf, size_t n)
+bool sendAll(int sock,const char* buffer,int totalBytes)
 {
-    // send() can send fewer bytes than asked for, so keep calling it until all n bytes are sent.
-    // Use the flag MSG_NOSIGNAL. Return false if the connection fails.
+    int sent = 0;
+
+    while (sent < totalBytes)
+    {
+        int rez = send(sock,buffer + sent,totalBytes - sent,0);
+        if (rez <= 0)
+        {
+            return false;
+        }
+        sent = sent+rez;
+    }
+
+    return true;
 }
 
-int connectToHost(const char *host, int port)
+int connectToHost(const char* host,int port)
 {
-    // Create a TCP socket and connect it to host:port.
-    // Return the socket, or -1 if the connection fails.
+    
 }
 bool uploadSource(int sock, const char *sourcePath)
 {
