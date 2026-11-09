@@ -59,68 +59,75 @@ class Queue
     {
         T data;
         Node *next;
+        Node(const T &val) : data(val), next(nullptr) {}
     };
     Node *front, *rear;
     int count;
 
-
 public:
-    // Implement these functions:
     Queue()
     {
         front = nullptr;
         rear = nullptr;
+        count = 0;
     }
+
     ~Queue()
     {
-        delete[]front;
-        delete[]rear;
+        while (!isEmpty())
+        {
+            dequeue();
+        }
     }
+
     void enqueue(const T &val)
     {
-        if (count ==0)
+        Node *nEw = new Node(val);
+        if (count == 0)
         {
-            Node* nEw = new Node(val);
             front = nEw;
             rear = front;
-            count = count+1;
-            return;
         }
-        Node* NEw= new Node(val);
-        rear->next = NEw;
-        rear = NEw;
-        count = count+1;
+        else
+        {
+            rear->next = nEw;
+            rear = nEw;
+        }
+        count++;
     }
+
     T dequeue()
     {
-        if(isEmpty())
+        if (isEmpty())
         {
             std::__throw_out_of_range("THE QUEUE IS EMPTY");
         }
-        if(count == 1)
-        {
-            T temp = front->data;
-            delete []front;
-            front = nullptr;
-            rear = nullptr;
-            count = count-1;
-            return temp;
-        }
-        T temp = front->data;
+
+        Node *tempNode = front;
+        T temp = tempNode->data;
+
         front = front->next;
-        count = count-1;
+        delete tempNode;
+        count--;
+
+        if (count == 0)
+        {
+            rear = nullptr;
+        }
+
         return temp;
     }
+
     bool isEmpty()
     {
-        return (count == 1);
+        return count == 0;
     }
+
     int size()
     {
         return count;
     }
 };
-
 struct ClientInfo
 {
     int sock;           // the connected socket
@@ -136,24 +143,63 @@ sig_atomic_t flag = 1;
 
 
 // ---- Basic socket helpers ----
-bool sendAll(int sock, const char *buf, size_t n) 
+bool sendAll(int sock, const char *buf, size_t n)
 {
-    // Reply format: [status: 1 byte][sending_material][checksum: 4 bytes].
-    // send() may send fewer bytes than asked for, so keep calling it until all n bytes are sent.
-    
+    size_t sent = 0;
+    while (sent < n)
+    {
+        ssize_t res = send(sock, buf + sent, n - sent, 0);
+        if (res <= 0)
+        {
+            return false; 
+        }
+        sent = sent + res;
+    }
+    return true;
 }
 bool sendError(int sock, const string &message)
 {
-    // Reply format: [status: 1 byte][payload until close][checksum: 4 bytes].
-    // For an error: send one byte with value 1, then the message text. 
+    char stat_bite = 1; 
+    if (!sendAll(sock, &stat_bite, 1))
+    {
+        return false;
+    }
+    return sendAll(sock, message.c_str(), message.length());
 }
+
 int createListenSocket(int port)
-{ 
-    // Create a TCP socket with SOCK_CLOEXEC(flag).
-    // set SO_REUSEADDR so we can restart the load balancer right away.
-    // bind() to the port on any address, then listen(LISTEN_BACKLOG).
-    // If bind or listen fails, print the error and exit, because without this socket we cannot work.
+{
+    int sock = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (sock < 0)
+    {
+        cerr << "Error creating listen socket" << endl;
+        exit(1);
+    }
+
+    int opt = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+
+    if (bind(sock, (sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+        cerr << "Error binding listen socket to port " << port << endl;
+        close(sock);
+        exit(1);
+    }
+
+    if (listen(sock, LISTEN_BACKLOG) < 0)
+    {
+        cerr << "Error listening on socket" << endl;
+        close(sock);
+        exit(1);
+    }
+    return sock;
 }
+
 int connectToServer(const char *host, int port)
 {
     // Create a TCP socket (SOCK_CLOEXEC) and connect it to host:port.
