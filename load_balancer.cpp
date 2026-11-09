@@ -26,6 +26,7 @@
 
 #include <iostream>
 #include <string>
+#include <cstring>
 #include <cstdlib>
 #include <thread>
 #include <mutex>
@@ -202,8 +203,29 @@ int createListenSocket(int port)
 
 int connectToServer(const char *host, int port)
 {
-    // Create a TCP socket (SOCK_CLOEXEC) and connect it to host:port.
-    // Return the socket, or -1 if the connection fails 
+    int sock = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (sock < 0)
+    {
+        return -1;
+    }
+
+    sockaddr_in addr= {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+
+    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0)
+    {
+        close(sock);
+        return -1;
+    }
+
+    if (connect(sock, (sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+        close(sock);
+        return -1;
+    }
+
+    return sock;
 }
 
 // =============================================================================================
@@ -217,13 +239,36 @@ bool startServer(int port)
     //   Example: "./server 5001 &"
     // Call system() with it.
     // Return true if system() returned 0, otherwise false.
+    string cmd = string(SERVER_PATH) + " " + to_string(port) + " &";
+    int res = system(cmd.c_str());
+    return (res == 0);
 }
+
 int connectToServerWithWakeup()
 {
-    // 1. Try connectToServer(). If it works, return that socket. The server is alive.
-    // 2. Otherwise call startServer(). If it fails, return -1.
-    // 3. Try connectToServer() up to STARTUP_MAX_ATTEMPTS times 
-    // 4. Return the first working socket, or -1 if the server never came up.
+    int sock = connectToServer(serverHost.c_str(), serverPort);
+    if (sock >= 0)
+    {
+        return sock;
+    }
+
+    if (!startServer(serverPort))
+    {
+        return -1;
+    }
+
+  
+    for (int i = 0; i < STARTUP_MAX_ATTEMPTS; i++)
+    {
+        usleep(STARTUP_POLL_INTERVAL_MS * 1000);
+        sock = connectToServer(serverHost.c_str(), serverPort);
+        if (sock >= 0)
+        {
+            return sock; 
+        }
+    }
+
+    return -1; 
 }
 
 
@@ -234,16 +279,58 @@ int connectToServerWithWakeup()
 
 void relayOneClient(ClientInfo &c)
 {
-    // 1. serverSock = connectToServerWithWakeup().
-    //    If it is -1: sendError "backend server failed to start", close clientSock, return.
-    // 3. Client -> server: repeat recv() from clientSock into a buffer of IO_BUFFER_SIZE and sendAll() it to serverSock.
-    //    Stop when recv() returns 0 (the client finished sending) or fails.
-    // 4. Call shutdown(serverSock, SHUT_WR), so the server knows the string is complete.
-    // 5. Server -> client: repeat recv() from serverSock and sendAll() to clientSock.
-    //    Stop when recv() returns 0 (the server sent its whole reply and closed) or fails.
-    // 6. Close both sockets.
-}
+   
+    time_t now = time(nullptr);
+    if (difftime(now, c.arrivedAt) > 30.0)
+    {
+        close(c.sock);
+        return;
+    }
+    int serverSock = connectToServerWithWakeup();
+    if (serverSock < 0)
+    {
+        sendError(c.sock, "backend server failed to start");
+        close(c.sock);
+        return;
+    }
 
+    char buffer[IO_BUFFER_SIZE];
+
+   while (true)
+    {
+        ssize_t bytesRead = recv(c.sock, buffer, IO_BUFFER_SIZE, 0);
+        if (bytesRead <= 0)
+        {
+            break; 
+        }
+
+        if (!sendAll(serverSock, buffer, bytesRead))
+        {
+            close(serverSock);
+            close(c.sock);
+            return;
+        }
+    }
+
+    shutdown(serverSock, SHUT_WR);
+
+    while (true)
+    {
+        ssize_t bytesRead = recv(serverSock, buffer, IO_BUFFER_SIZE, 0);
+        if (bytesRead <= 0)
+        {
+            break; 
+        }
+
+        if (!sendAll(c.sock, buffer, bytesRead))
+        {
+            break;
+        }
+    }
+ 
+    close(serverSock);
+    close(c.sock);
+}
 
 // =============================================================================================
 // PART 3: THE TWO THREADS

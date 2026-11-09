@@ -742,6 +742,39 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
     fclose(f);
 }
 // PASS 0x3: SERIALIZE TIMELINE
+void writeString(FILE* f, const std::string& s)
+{
+    int32_t n = static_cast<int32_t>(s.length());
+    fwrite(&n, sizeof(int32_t), 1, f);
+    fwrite(s.c_str(), 1, n, f);
+}
+
+void writeVariable(FILE* f, const Variable& v)
+{
+    writeString(f, v.name);
+    fwrite(&v.value, sizeof(int32_t), 1, f);
+}
+
+void writeSnapshot(FILE* f, const Snapshot& s)
+{
+    fwrite(&s.stackDepth, sizeof(int32_t), 1, f);
+    for (int32_t i = 0; i < s.stackDepth; i++)
+    {
+        const Frame& fr = s.callStack[i];
+        writeString(f, fr.func_name);
+
+        fwrite(&fr.argc, sizeof(int32_t), 1, f);
+        for (int32_t a = 0; a < fr.argc; a++)
+            writeVariable(f, fr.argv[a]);
+
+        fwrite(&fr.returnLine, sizeof(int32_t), 1, f);
+
+        fwrite(&fr.localCount, sizeof(int32_t), 1, f);
+        for (int32_t l = 0; l < fr.localCount; l++)
+            writeVariable(f, fr.locals[l]);
+    }
+}
+
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
    
@@ -777,7 +810,7 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
 
         if (curr->data != nullptr)
         {
-            fwrite(curr->data, sizeof(Snapshot), 1, f);
+           writeSnapshot(f, *curr->data);
         }
 
         dex = dex+1;
@@ -801,7 +834,6 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     fclose(f);
 }
 
-// main section
 
 int32_t main()
 {
@@ -812,12 +844,12 @@ int32_t main()
         return 1;
     }
 
-    int64_t mainOffset = resolveProgram("Source.bin", "Resolve.bin");
+    int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
 
     Timeline timeline;
-    executeProgram("Resolve.bin", mainOffset, timeline);
+    executeProgram("resolve.bin", mainOffset, timeline);
 
-    writeTdbg(timeline, "Session.tdbg");
+    writeTdbg(timeline, "session.tdbg");
 
     return 0;
 }

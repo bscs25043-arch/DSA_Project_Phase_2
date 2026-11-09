@@ -124,7 +124,6 @@ int connectToHost(const char* host,int port)
 {
     
 }
-
 bool uploadSource(int sock, const char *sourcePath)
 {
     // have to do checksum and then send
@@ -156,6 +155,7 @@ void closeTdbg(TdbgReader &r)
 }
 Snapshot *readSnapshotAt(TdbgReader &r, int32_t step)
 {
+    
 }
 
 // =============================================================================================
