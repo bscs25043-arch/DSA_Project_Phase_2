@@ -91,7 +91,7 @@ bool recvAll(int sock,char* buffer,int totalBytes)
     int recved = 0;
     while (recved < totalBytes)
     {
-        int rez = recv( sock,buffer + rez,totalBytes - rez,0);
+        int rez = recv( sock,buffer + recved,totalBytes - recved,0);
 
         if (rez <= 0)
         {
@@ -155,7 +155,7 @@ void closeTdbg(TdbgReader &r)
 }
 Snapshot *readSnapshotAt(TdbgReader &r, int32_t step)
 {
-    
+
 }
 
 // =============================================================================================
