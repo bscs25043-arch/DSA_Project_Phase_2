@@ -71,7 +71,7 @@ struct TTDBHeader
 // ---- Structs only the client needs ----
 struct TdbgReader
 {
-    ssize_t file_index;
+    FILE* file; 
     TTDBHeader header;
     vector<int64_t> index;
 };
@@ -120,90 +120,6 @@ bool sendAll(int sock,const char* buffer,int totalBytes)
     return true;
 }
 
-// PART A: Socket helpers
-int connectToHost(const char* host, int port)
-{
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return -1;
-
-    sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-
-    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0 || connect(sock, (sockaddr *)&addr, sizeof(addr)) < 0)
-    {
-        close(sock);
-        return -1;
-    }
-    return sock;
-}
-
-bool uploadSource(int sock, const char *sourcePath)
-{
-    FILE* f = fopen(sourcePath, "rb");
-    if (!f) return false;
-
-    char buffer[IO_BUFFER_SIZE];
-    size_t n;
-    while ((n = fread(buffer, 1, sizeof(buffer), f)) > 0)
-    {
-        if (!sendAll(sock, buffer, static_cast<int>(n)))
-        {
-            fclose(f);
-            return false;
-        }
-    }
-    fclose(f);
-    shutdown(sock, SHUT_WR);
-    return true;
-}
-
-bool receiveResponse(int sock, const char *outTdbgPath, string &outError)
-{
-    vector<char> rawData;
-    char buf[IO_BUFFER_SIZE];
-    ssize_t res;
-    while ((res = recv(sock, buf, sizeof(buf), 0)) > 0)
-    {
-        rawData.insert(rawData.end(), buf, buf + res);
-    }
-
-    if (rawData.size() < 5)
-    {
-        outError = "invalid response length from server";
-        return false;
-    }
-
-    uint8_t status = rawData[0];
-    size_t payloadLen = rawData.size() - 5;
-    uint32_t recCrc;
-    memcpy(&recCrc, &rawData[rawData.size() - 4], 4);
-
-    uint32_t calcCrc = computeCRC32(rawData.data(), rawData.size() - 4);
-    if (calcCrc != recCrc)
-    {
-        outError = "checksum mismatch, response corrupted";
-        return false;
-    }
-
-    if (status != 0)
-    {
-        outError = string(rawData.data() + 1, payloadLen);
-        return false;
-    }
-
-    FILE* f = fopen(outTdbgPath, "wb");
-    if (!f)
-    {
-        outError = "failed to save output .tdbg file";
-        return false;
-    }
-    fwrite(rawData.data() + 1, 1, payloadLen, f);
-    fclose(f);
-    return true;
-}
-
-// PART B: TDBG file reader
 bool openTdbg(const char *path, TdbgReader &r)
 {
     r.file = fopen(path, "rb");
@@ -322,8 +238,8 @@ bool runCommand(DebugSession &s, const string &line, bool &quitRequested)
     //      quit, exit -> set quitRequested = true
     // 4. For anything else, or a wrong number of words, print "unknown command" and the help text, and return false.
 }
-int main(int argc, char *argv[])
-{
+//int main(int argc, char *argv[])
+//{
     // you get string LB_HOST and int LB_PORT = 0 in arguments of this main function. 
 
     // DebugSession session; initSession(session);
@@ -335,4 +251,35 @@ int main(int argc, char *argv[])
     // After the loop: closeSession(session) and return 0.
     // Never exit the loop because of an error. Only quit or the end of the input leaves it.
 
+//}
+int main(int argc, char *argv[])
+{
+    const char* testFile = (argc > 1) ? argv[1] : "session.tdbg";
+    std::cout << "=== Testing Client Offline .tdbg Reader ===" << std::endl;
+
+    TdbgReader reader;
+    if (!openTdbg(testFile, reader))
+    {
+        std::cerr << "[Client Test Error] Could not open or parse " << testFile << std::endl;
+        return 1;
+    }
+
+    std::cout << "[Client Test] Magic: " << string(reader.header.magic, 4)
+              << " | Version: " << reader.header.version
+              << " | Step Count: " << reader.header.stepCount << std::endl;
+
+    // Test reading step 0
+    if (reader.header.stepCount > 0)
+    {
+        Snapshot* s = readSnapshotAt(reader, 0);
+        if (s)
+        {
+            std::cout << "[Client Test] Successfully read Step 0 Snapshot:" << std::endl;
+            printSnapshot(0, reader.header.stepCount, *s);
+            delete s;
+        }
+    }
+
+    closeTdbg(reader);
+    return 0;
 }

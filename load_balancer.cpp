@@ -38,7 +38,6 @@
 #include "helper.cpp"
 using namespace std;
 
-
 // ---- Constants ----
 const char *SERVER_PATH = "./server";      // the program we start when the server is down
 const int IO_BUFFER_SIZE = 64 * 1024;      // fixed buffer for moving bytes
@@ -360,12 +359,41 @@ void handler(int sg) {
     (void)sg;
     flag = 0;
 }
-int main(int argc, char *argv[])
-{
+//int main(int argc, char *argv[])
+//{
 
-    signal(SIGINT, handler); // whenever ctrl+c will be pressed to exit the program the flag wll be set so insead of using infinite loop you can loop on flag to safely close things and exit
-    // 2. listenSock = createListenSocket(LB_PORT).
+   // signal(SIGINT, handler); // whenever ctrl+c will be pressed to exit the program the flag wll be set so insead of using infinite loop you can loop on flag to safely close things and exit
+    //// 2. listenSock = createListenSocket(LB_PORT).
     // 3. Start a thread that runs acceptLoop(listenSock) and detach it.
     // 4. Call dispatcherLoop().
+    //return 0;
+//}
+int main(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    std::cout << "=== Testing Load Balancer Unit Logic ===" << std::endl;
+
+    // 1. Test Queue Implementation
+    Queue<ClientInfo> testQueue;
+    testQueue.enqueue({1, "127.0.0.1", 5000, time(nullptr)});
+    testQueue.enqueue({2, "127.0.0.1", 5001, time(nullptr)});
+
+    std::cout << "[LB Test] Queue Enqueue size: " << testQueue.size() << " (Expected: 2)" << std::endl;
+    ClientInfo dequeued = testQueue.dequeue();
+    std::cout << "[LB Test] Dequeued Socket ID: " << dequeued.sock << " (Expected: 1)" << std::endl;
+
+    // 2. Test Backend Server Auto-Wakeup Logic
+    std::cout << "[LB Test] Attempting server connection/auto-wakeup..." << std::endl;
+    int sSock = connectToServerWithWakeup();
+    if (sSock >= 0)
+    {
+        std::cout << "[LB Test] Successfully connected to backend server on socket: " << sSock << std::endl;
+        close(sSock);
+    }
+    else
+    {
+        std::cout << "[LB Test Result] Backend server down or binary missing at " << SERVER_PATH << std::endl;
+    }
+
     return 0;
 }

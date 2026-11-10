@@ -760,19 +760,41 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     delete[] int_dexs;
     fclose(f);
 }
-int32_t main()
+
+int32_t main(int argc, char* argv[])
 {
-    if (!validateProgram("source.bin"))
+    const char* sourceFile = (argc > 1) ? argv[1] : "source.bin";
+    const char* resolveFile = "resolve.bin";
+    const char* tdbgFile = "session.tdbg";
+
+    std::cout << "[Server] Testing Pass 0x0: Validating " << sourceFile << "..." << std::endl;
+    if (!validateProgram(sourceFile))
     {
+        std::cerr << "[Server Error] Validation failed (unmatched func/func_end or nested functions)." << std::endl;
         return 1;
     }
+    std::cout << "[Server] Pass 0x0 Passed." << std::endl;
 
-    int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
+    try
+    {
+        std::cout << "[Server] Testing Pass 0x1: Resolving program offsets..." << std::endl;
+        int64_t mainOffset = resolveProgram(sourceFile, resolveFile);
+        std::cout << "[Server] Pass 0x1 Passed. 'main' offset at: " << mainOffset << " bytes." << std::endl;
 
-    Timeline timeline;
-    executeProgram("resolve.bin", mainOffset, timeline);
+        std::cout << "[Server] Testing Pass 0x2: Executing timeline..." << std::endl;
+        Timeline timeline;
+        executeProgram(resolveFile, mainOffset, timeline);
+        std::cout << "[Server] Pass 0x2 Passed. Recorded " << timeline.getStepCount() << " steps." << std::endl;
 
-    writeTdbg(timeline, "session.tdbg");
+        std::cout << "[Server] Testing Pass 0x3: Serializing session to " << tdbgFile << "..." << std::endl;
+        writeTdbg(timeline, tdbgFile);
+        std::cout << "[Server] Pass 0x3 Passed. File successfully created." << std::endl;
+    }
+    catch (const std::exception& ex)
+    {
+        std::cerr << "[Server Pipeline Error] " << ex.what() << std::endl;
+        return 1;
+    }
 
     return 0;
 }
