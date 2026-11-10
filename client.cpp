@@ -120,38 +120,128 @@ bool sendAll(int sock,const char* buffer,int totalBytes)
     return true;
 }
 
-int connectToHost(const char* host,int port)
+// PART A: Socket helpers
+int connectToHost(const char* host, int port)
 {
-    
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return -1;
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+
+    if (inet_pton(AF_INET, host, &addr.sin_addr) <= 0 || connect(sock, (sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+        close(sock);
+        return -1;
+    }
+    return sock;
 }
+
 bool uploadSource(int sock, const char *sourcePath)
 {
-    // have to do checksum and then send
-    // When the file is finished, call shutdown(sock, SHUT_WR). This is how the server knows the string is complete.
-    // Return false if the file cannot be opened or any send fails.
+    FILE* f = fopen(sourcePath, "rb");
+    if (!f) return false;
+
+    char buffer[IO_BUFFER_SIZE];
+    size_t n;
+    while ((n = fread(buffer, 1, sizeof(buffer), f)) > 0)
+    {
+        if (!sendAll(sock, buffer, static_cast<int>(n)))
+        {
+            fclose(f);
+            return false;
+        }
+    }
+    fclose(f);
+    shutdown(sock, SHUT_WR);
+    return true;
 }
+
 bool receiveResponse(int sock, const char *outTdbgPath, string &outError)
 {
-    // Reply on the wire: [status][payload][CRC-32]. The CRC covers the status byte too.
-    // Feed every received byte (status included) to a TrailerChecker.
-    // Status 1: collect the payload into outError. Status 0: write the payload to the file.
-    // At the end call verify(). If it fails, delete the file, set outError to
-    // "checksum mismatch, response corrupted" and return false.
+    vector<char> rawData;
+    char buf[IO_BUFFER_SIZE];
+    ssize_t res;
+    while ((res = recv(sock, buf, sizeof(buf), 0)) > 0)
+    {
+        rawData.insert(rawData.end(), buf, buf + res);
+    }
+
+    if (rawData.size() < 5)
+    {
+        outError = "invalid response length from server";
+        return false;
+    }
+
+    uint8_t status = rawData[0];
+    size_t payloadLen = rawData.size() - 5;
+    uint32_t recCrc;
+    memcpy(&recCrc, &rawData[rawData.size() - 4], 4);
+
+    uint32_t calcCrc = computeCRC32(rawData.data(), rawData.size() - 4);
+    if (calcCrc != recCrc)
+    {
+        outError = "checksum mismatch, response corrupted";
+        return false;
+    }
+
+    if (status != 0)
+    {
+        outError = string(rawData.data() + 1, payloadLen);
+        return false;
+    }
+
+    FILE* f = fopen(outTdbgPath, "wb");
+    if (!f)
+    {
+        outError = "failed to save output .tdbg file";
+        return false;
+    }
+    fwrite(rawData.data() + 1, 1, payloadLen, f);
+    fclose(f);
+    return true;
 }
 
-// =============================================================================================
-// PART B: READING THE .tdbg FILE
-// File layout (written by Phase 1):
-//   header | snapshot 0 | snapshot 1 | ... | index (one 8 byte offset per snapshot)
-// The index lets us jump straight to any step without reading the steps before it.
-// =============================================================================================
-
+// PART B: TDBG file reader
 bool openTdbg(const char *path, TdbgReader &r)
 {
+    r.file = fopen(path, "rb");
+    if (!r.file) return false;
+
+    if (fread(r.header.magic, 1, 4, r.file) != 4 ||
+        fread(&r.header.version, sizeof(int32_t), 1, r.file) != 1 ||
+        fread(&r.header.stepCount, sizeof(int32_t), 1, r.file) != 1 ||
+        fread(&r.header.indexOffset, sizeof(int64_t), 1, r.file) != 1)
+    {
+        fclose(r.file);
+        return false;
+    }
+
+    if (memcmp(r.header.magic, "TTDB", 4) != 0)
+    {
+        fclose(r.file);
+        return false;
+    }
+
+    r.index.resize(r.header.stepCount);
+    fseek(r.file, r.header.indexOffset, SEEK_SET);
+    if (r.header.stepCount > 0 && fread(r.index.data(), sizeof(int64_t), r.header.stepCount, r.file) != static_cast<size_t>(r.header.stepCount))
+    {
+        fclose(r.file);
+        return false;
+    }
+    return true;
 }
+
 void closeTdbg(TdbgReader &r)
 {
-    // Free r.index and close the file.
+    if (r.file)
+    {
+        fclose(r.file);
+        r.file = nullptr;
+    }
+    r.index.clear();
 }
 Snapshot *readSnapshotAt(TdbgReader &r, int32_t step)
 {

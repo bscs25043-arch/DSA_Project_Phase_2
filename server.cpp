@@ -21,13 +21,9 @@
 const int32_t MAX_VARS_PER_FRAME = 16;
 const int32_t MAX_STACK_DEPTH = 64;
 const int32_t MAX_FUNCS = 128;
-const int32_t MAX_TOKENS = MAX_VARS_PER_FRAME + 2; // kW + func_name + upto 16 params/args
-const int32_t MAX_PATCHES = MAX_FUNCS * 4;
-const uint64_t MAX_SOURCE_BYTES = 15ULL * 1024 * 1024; // sanity cap on the declared file length
-const int32_t IO_BUFFER_SIZE = 64 * 1024;                  // fixed buffer for streaming to/from disk
-const int32_t SOCKET_TIMEOUT_SEC = 5;                      // TODO: apply as SO_RCVTIMEO so a deadclient can't hang the server forever
+const int32_t MAX_TOKENS = MAX_VARS_PER_FRAME + 2;
+const int32_t IO_BUFFER_SIZE = 64 * 1024;
 
-// Stack: back the live Call Stack during execution
 template <typename T>
 class Stack
 {
@@ -40,69 +36,64 @@ class Stack
     int32_t count;
 
 public:
-    // Implement these functions:
-    Stack()
+    Stack() : top(nullptr), count(0) {}
+
+    ~Stack()
     {
-        top = nullptr;
-        count = 0;
+        while (!isEmpty()) pop();
     }
+
     void push(const T& val)
     {
         if (count == MAX_STACK_DEPTH)
-            throw std::out_of_range("Max Limit Reached for Stack!!!\n");
-        Node* Next_Node = new Node;
-        Next_Node->data = val;
-        Next_Node->next = top;
+            throw std::out_of_range("Max Limit Reached for Stack!!!");
+        Node* Next_Node = new Node{val, top};
         top = Next_Node;
-        count = count + 1;
+        count++;
     }
+
     T pop()
     {
         if (count == 0)
-        {
-            throw std::out_of_range("Max_Limit_Reached_For_Stack_Depth\n");
-        }
+            throw std::out_of_range("Stack Underflow");
         T deleted = top->data;
         Node* tem = top->next;
         delete top;
         top = tem;
-        count = count - 1;
+        count--;
         return deleted;
-    
     }
+
     T& peek()
     {
         if (count == 0)
-        {
-            throw std::out_of_range("Max Limit Reached for Stack!!!\n");
-        }
+            throw std::out_of_range("Stack is empty");
         return top->data;
-       
     }
-    bool isEmpty()
+
+    bool isEmpty() { return count == 0; }
+    int32_t depth() { return count; }
+
+    int32_t snapshot_into(T out[], int32_t maxLen)
     {
-        return count == 0;
+        int32_t copied = 0;
+        std::vector<T> temp;
+        Node* curr = top;
+
+        while (curr != nullptr && (int)temp.size() < maxLen)
+        {
+            temp.push_back(curr->data);
+            curr = curr->next;
+        }
+
+        // Store bottom-to-top so index 0 is main
+        for (int i = (int)temp.size() - 1; i >= 0; i--)
+        {
+            out[copied++] = temp[i];
+        }
+
+        return copied;
     }
-    int32_t depth()
-    {
-        return count;
-    }
-   int32_t snapshot_into(T out[], int32_t maxLen)
-{
-    int32_t copied = 0;
-
-    Node* curr = top;
-
-    while (curr != nullptr && copied < maxLen)
-    {
-        out[copied] = curr->data;
-        copied++;
-
-        curr = curr->next;
-    }
-
-    return copied;
-}
 };
 
 struct Snapshot;
@@ -115,54 +106,51 @@ struct TimelineNode
 
 class Timeline
 {
-    TimelineNode* head, * tail;
+    TimelineNode* head;
+    TimelineNode* tail;
     int32_t stepCount;
 
 public:
-    // Implement these functions
-    Timeline()
+    Timeline() : head(nullptr), tail(nullptr), stepCount(0) {}
+
+    ~Timeline()
     {
-        head = nullptr;
-        tail = nullptr;
-        stepCount = 0;
+        TimelineNode* curr = head;
+        while (curr)
+        {
+            TimelineNode* nxt = curr->next;
+            delete curr->data;
+            delete curr;
+            curr = nxt;
+        }
     }
+
     void record(Snapshot* s)
     {
         if (s == nullptr)
             throw std::invalid_argument("Cannot record null Snapshot");
 
-        TimelineNode* temp = new TimelineNode();
-        temp->data = s;
-        temp->next = nullptr;
-        temp->prev = tail;
-       if (head == nullptr)
-       {
-        head = temp;
-        head->prev = nullptr;
-        tail = temp;
-        tail->next = nullptr;
-       }
-else
-{
-    tail->next = temp;
-    tail = temp;
-}
-
-stepCount++;
-    }
-    TimelineNode* begin()
-    {
-        if (head != nullptr)
-            return head;
+        TimelineNode* temp = new TimelineNode{s, nullptr, tail};
+        if (head == nullptr)
+        {
+            head = tail = temp;
+        }
         else
         {
-            throw std::out_of_range("Head is Null and ThereFore Cannot be accessed!\n");
+            tail->next = temp;
+            tail = temp;
         }
+        stepCount++;
     }
-    int32_t getStepCount()
+
+    TimelineNode* begin()
     {
-        return stepCount;
+        if (head == nullptr)
+            throw std::out_of_range("Timeline is empty");
+        return head;
     }
+
+    int32_t getStepCount() { return stepCount; }
 };
 
 struct Variable
@@ -170,6 +158,7 @@ struct Variable
     std::string name;
     int32_t value;
 };
+
 struct Frame
 {
     std::string func_name;
@@ -178,15 +167,18 @@ struct Frame
     int32_t returnLine;
     Variable locals[MAX_VARS_PER_FRAME];
     int32_t localCount;
+    std::string callerArgNames[MAX_VARS_PER_FRAME]; // Tracks caller variable names for reflection
 };
+
 struct Snapshot
 {
     Frame callStack[MAX_STACK_DEPTH];
     int32_t stackDepth;
 };
+
 struct TTDBHeader
 {
-    char magic[4]; 
+    char magic[4];
     int32_t version;
     int32_t stepCount;
     int64_t indexOffset;
@@ -206,12 +198,7 @@ void writeHeader(FILE* f, const TTDBHeader& h)
 struct FuncEntry
 {
     std::string funcName;
-    int64_t byteOffsetInResolveBin; 
-};
-struct PendingPatch
-{
-    std::int64_t byteOffsetOfOffsetField; 
-    std::string targetFuncName;
+    int64_t byteOffsetInResolveBin;
 };
 
 bool readSourceLine(std::ifstream& in, std::string& out)
@@ -219,11 +206,11 @@ bool readSourceLine(std::ifstream& in, std::string& out)
     std::string line;
     while (std::getline(in, line))
     {
-        size_t pos = line.find_first_not_of(" \t\r\n");
-
-        if (pos != std::string::npos)
+        size_t start = line.find_first_not_of(" \t\r\n");
+        if (start != std::string::npos)
         {
-            out = line.substr(pos);
+            size_t end = line.find_last_not_of(" \t\r\n");
+            out = line.substr(start, end - start + 1);
             return true;
         }
     }
@@ -233,34 +220,19 @@ bool readSourceLine(std::ifstream& in, std::string& out)
 std::string firstWord(const std::string& line)
 {
     size_t spacePos = line.find_first_of(" \t");
-    if (spacePos == std::string::npos)
-    {
-        return line;
-    }
-    else
-    {
-        return line.substr(0, spacePos);
-    }
+    return (spacePos == std::string::npos) ? line : line.substr(0, spacePos);
 }
+
 std::string secondWord(const std::string& line)
 {
     size_t firstSpace = line.find_first_of(" \t");
-    if (firstSpace == std::string::npos)
-        return ("");
+    if (firstSpace == std::string::npos) return "";
     size_t secondStart = line.find_first_not_of(" \t", firstSpace);
-    if (secondStart == std::string::npos)
-        return ("");
+    if (secondStart == std::string::npos) return "";
     size_t secondEnd = line.find_first_of(" \t", secondStart);
-
-    if (secondEnd == std::string::npos)
-    {
-        return line.substr(secondStart);
-    }
-    else
-    {
-        return line.substr(secondStart, secondEnd - secondStart);
-    }
+    return (secondEnd == std::string::npos) ? line.substr(secondStart) : line.substr(secondStart, secondEnd - secondStart);
 }
+
 bool validateProgram(const char* sourcePath)
 {
     std::string line;
@@ -268,149 +240,154 @@ bool validateProgram(const char* sourcePath)
     if (!file.is_open())
         throw std::runtime_error("Failed to open source file in validateProgram");
     int groove = 0;
+    std::vector<std::string> funcs;
     while (readSourceLine(file, line))
     {
         std::string kw = firstWord(line);
         if (kw == "func")
         {
-            groove = groove + 1;
-            if (groove > 1)
-                return false;
+            std::string fn = secondWord(line);
+            for (const auto& f : funcs)
+            {
+                if (f == fn) return false; // Duplicate function check
+            }
+            funcs.push_back(fn);
+            groove++;
+            if (groove > 1) return false; // Reject nested functions
         }
-        if (kw == "func_end")
+        else if (kw == "func_end")
         {
-           groove--;
-
-         if (groove < 0)
-          return false;
+            groove--;
+            if (groove < 0) return false;
         }
     }
-    if (groove != 0)
-        return false;
-    return true;
+    return (groove == 0);
 }
 
-// PASS 0x1: RESOLVE() -> resolve.bin
 int64_t writeResolveRecord(FILE* f, int64_t offsetField, const std::string& text)
 {
-    if (!f)
-        throw std::runtime_error("Invalid file pointer in writeResolveRecord");
-
+    if (!f) throw std::runtime_error("Invalid file pointer in writeResolveRecord");
     int64_t current_pos = ftell(f);
     int32_t siz = static_cast<int32_t>(text.length());
     fwrite(&offsetField, sizeof(int64_t), 1, f);
-    fwrite(&siz, sizeof(int32_t),1, f);
+    fwrite(&siz, sizeof(int32_t), 1, f);
     fwrite(text.c_str(), sizeof(char), siz, f);
-
     return current_pos;
 }
+
 int64_t readResolveRecord(FILE* f, std::string& outText)
 {
-    if (!f)
-        throw std::runtime_error("Invalid file pointer in readResolveRecord");
-
+    if (!f) throw std::runtime_error("Invalid file pointer in readResolveRecord");
     int64_t off_Field = 0;
     int32_t siz = 0;
-
-    if (fread(&off_Field, sizeof(int64_t), 1, f) != 1)
-        return -1;
-    if (fread(&siz, sizeof(int32_t), 1, f) != 1)
-        return -1;
-
+    if (fread(&off_Field, sizeof(int64_t), 1, f) != 1) return -1;
+    if (fread(&siz, sizeof(int32_t), 1, f) != 1) return -1;
     outText.resize(siz);
     if (fread(&outText[0], sizeof(char), siz, f) != static_cast<size_t>(siz)) return -1;
-
     return off_Field;
 }
+
 int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
 {
     std::ifstream in(sourcePath);
-
     if (!in.is_open())
         throw std::runtime_error("Failed to open sourcePath in resolveProgram");
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (readSourceLine(in, line))
+    {
+        lines.push_back(line);
+    }
+    in.close();
 
     FuncEntry funcArray[MAX_FUNCS];
     int32_t funcCount = 0;
 
-    std::string line;
-    int64_t curr_Offset = 0;
-
-    while (readSourceLine(in, line))
+    for (size_t i = 0; i < lines.size(); i++)
     {
-        if (firstWord(line) == "func")
+        if (firstWord(lines[i]) == "func")
         {
             if (funcCount >= MAX_FUNCS)
-            {
-                in.close();
                 throw std::out_of_range("Max limit reached for function count in resolveProgram");
-            }
-            funcArray[funcCount].funcName = secondWord(line);
-            funcArray[funcCount].byteOffsetInResolveBin = curr_Offset;
+            funcArray[funcCount].funcName = secondWord(lines[i]);
+            funcArray[funcCount].byteOffsetInResolveBin = 0;
             funcCount++;
         }
-        curr_Offset = curr_Offset + 8 + 4 + line.length();
     }
-    in.close();
+
+    std::vector<int64_t> lineOffsets(lines.size(), 0);
+    std::vector<std::string> patchedLines = lines;
+
+    // 2-Pass iterative offset alignment
+    for (int iter = 0; iter < 2; iter++)
+    {
+        int64_t curr_Offset = 0;
+        for (size_t i = 0; i < lines.size(); i++)
+        {
+            lineOffsets[i] = curr_Offset;
+            std::string kw = firstWord(lines[i]);
+            if (kw == "func")
+            {
+                std::string fn = secondWord(lines[i]);
+                for (int f = 0; f < funcCount; f++)
+                {
+                    if (funcArray[f].funcName == fn)
+                    {
+                        funcArray[f].byteOffsetInResolveBin = curr_Offset;
+                        break;
+                    }
+                }
+            }
+            if (kw == "call")
+            {
+                std::string target = secondWord(lines[i]);
+                int64_t targetOffset = -1;
+                for (int f = 0; f < funcCount; f++)
+                {
+                    if (funcArray[f].funcName == target)
+                    {
+                        targetOffset = funcArray[f].byteOffsetInResolveBin;
+                        break;
+                    }
+                }
+                if (targetOffset == -1 && iter == 1)
+                {
+                    throw std::runtime_error("Call to undefined function: " + target);
+                }
+                std::string patched = "call " + std::to_string(targetOffset == -1 ? 0 : targetOffset);
+                size_t firstSpace = lines[i].find_first_of(" \t");
+                if (firstSpace != std::string::npos)
+                {
+                    size_t secondStart = lines[i].find_first_not_of(" \t", firstSpace);
+                    if (secondStart != std::string::npos)
+                    {
+                        size_t secondEnd = lines[i].find_first_of(" \t", secondStart);
+                        if (secondEnd != std::string::npos)
+                        {
+                            patched += lines[i].substr(secondEnd);
+                        }
+                    }
+                }
+                patchedLines[i] = patched;
+            }
+            else
+            {
+                patchedLines[i] = lines[i];
+            }
+
+            curr_Offset += 8 + 4 + patchedLines[i].length();
+        }
+    }
 
     FILE* out = fopen(resolveBinPath, "wb");
-
     if (out == nullptr)
         throw std::runtime_error("Failed to open resolveBinPath for writing");
 
-    in.open(sourcePath);
-
-    if (!in.is_open())
+    for (size_t i = 0; i < lines.size(); i++)
     {
-        fclose(out);
-        throw std::runtime_error("Failed to re-open sourcePath in resolveProgram");
+        writeResolveRecord(out, lineOffsets[i], patchedLines[i]);
     }
-
-    curr_Offset = 0;
-
-    while (readSourceLine(in, line))
-    {
-        std::string kw = firstWord(line);
-        if (kw == "call")
-        {
-            std::string target = secondWord(line);
-            int64_t targetOffset = -1;
-            for (int i = 0; i < funcCount; i++)
-            {
-                if (funcArray[i].funcName == target)
-                {
-                    targetOffset = funcArray[i].byteOffsetInResolveBin;
-                    break;
-                }
-            }
-            if (targetOffset == -1)
-            {
-                in.close();
-                fclose(out);
-                throw std::runtime_error("Call to undefined function: " + target);
-            }
-            std::string patchedLine = "call " + std::to_string(targetOffset);
-            size_t secondSpace = line.find(' ');
-
-           if (secondSpace != std::string::npos)
-           {
-           secondSpace = line.find(' ', secondSpace + 1);
-
-            if (secondSpace != std::string::npos)
-            {
-             patchedLine += line.substr(secondSpace);
-             }
-}
-
-           writeResolveRecord(out, targetOffset, patchedLine);
-        }
-        else
-        {
-            writeResolveRecord(out, curr_Offset, line);
-        }
-
-        curr_Offset = curr_Offset + 8 + 4 + line.length();
-    }
-    in.close();
     fclose(out);
 
     for (int i = 0; i < funcCount; i++)
@@ -421,99 +398,71 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     throw std::runtime_error("Main function not found in source program");
 }
 
-// PASS 0x2: EXECUTION (tokenization happens here)
 std::string getFunctionNameAtOffset(FILE* f, int64_t offset)
 {
     fseek(f, offset, SEEK_SET);
-
     std::string line;
-
     readResolveRecord(f, line);
-
     return secondWord(line);
 }
-enum TokenType
-{
-    KEYWORD,
-    IDENTIFIER,
-    PARAM
-};
-struct Token
-{
-    TokenType type;
-    std::string text;
-};
+
+enum TokenType { KEYWORD, IDENTIFIER, PARAM };
+struct Token { TokenType type; std::string text; };
+
 int32_t tokenizeLine(const std::string& line, Token tokens[], int32_t maxTokens)
 {
-    if (maxTokens < 2)
-        throw std::invalid_argument("maxTokens must be at least 2");
+    int32_t count = 0;
+    size_t i = 0;
+    size_t len = line.length();
 
-    std::string Fw = firstWord(line);
-    tokens[0].text = Fw;
-    tokens[0].type = KEYWORD;
-    std::string Sw = secondWord(line);
-    tokens[1].text = Sw;
-    tokens[1].type = IDENTIFIER;
-
-    int counter = 2;
-    int dex = line.find(Sw);
-    if (dex == std::string::npos)
-        return counter;
-    dex = dex + Sw.length();
-    std::string word;
-
-    while (dex < line.length())
+    while (i < len && count < maxTokens)
     {
-        if (line[dex] != '\n' && line[dex] != '\t' && line[dex] != ' ')
-        {
-            word = word + line[dex];
-        }
-        else
-        {
-            if (!word.empty() && counter < maxTokens)
-            {
-                tokens[counter].text = word;
-                tokens[counter].type = PARAM;
-                counter = counter + 1;
-                word.erase();
-            }
-        }
-        dex = dex + 1;
-    }
+        while (i < len && (line[i] == ' ' || line[i] == '\t' || line[i] == '\r' || line[i] == '\n')) i++;
+        if (i >= len) break;
 
-    if (!word.empty() && counter < maxTokens)
-    {
-        tokens[counter].text = word;
-        tokens[counter].type = PARAM;
-        counter = counter + 1;
+        size_t start = i;
+        while (i < len && line[i] != ' ' && line[i] != '\t' && line[i] != '\r' && line[i] != '\n') i++;
+
+        tokens[count].text = line.substr(start, i - start);
+        if (count == 0) tokens[count].type = KEYWORD;
+        else if (count == 1) tokens[count].type = IDENTIFIER;
+        else tokens[count].type = PARAM;
+        count++;
     }
-    return counter;
+    return count;
 }
+
 Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
     Snapshot* temp = new Snapshot();
     temp->stackDepth = callStack.depth();
-
     if (!callStack.isEmpty())
     {
         callStack.snapshot_into(temp->callStack, MAX_STACK_DEPTH);
     }
-
     return temp;
 }
+
+int32_t getVariableValue(Frame& frame, const std::string& name)
+{
+    for (int i = 0; i < frame.localCount; i++)
+    {
+        if (frame.locals[i].name == name) return frame.locals[i].value;
+    }
+    for (int i = 0; i < frame.argc; i++)
+    {
+        if (frame.argv[i].name == name) return frame.argv[i].value;
+    }
+    throw std::runtime_error("Undefined variable: " + name);
+}
+
 void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& timeline)
 {
     FILE* f = fopen(resolveBinPath, "rb");
-    if (!f)
-        throw std::runtime_error("Failed to open resolveBinPath in executeProgram");
+    if (!f) throw std::runtime_error("Failed to open resolveBinPath in executeProgram");
 
     Stack<Frame> staq;
-
-    Frame Fr;
-    Fr.func_name = "main";
-    Fr.argc = 0;
-    Fr.localCount = 0;
-    Fr.returnLine = -1;
+    Frame Fr{"main", 0, {}, -1, {}, 0, {}};
     staq.push(Fr);
 
     int64_t currentOffset = mainOffset;
@@ -521,13 +470,11 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
     while (!staq.isEmpty())
     {
         fseek(f, currentOffset, SEEK_SET);
-
         std::string line;
         int64_t storedOffset = readResolveRecord(f, line);
         if (storedOffset == -1) break;
 
         int64_t nextOffset = currentOffset + 8 + 4 + line.length();
-
         Token tokens[MAX_TOKENS];
         int32_t counter = tokenizeLine(line, tokens, MAX_TOKENS);
 
@@ -536,11 +483,19 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
             std::string kw = tokens[0].text;
             Frame& curr_Fr = staq.peek();
 
-            if (kw == "set")
+            if (kw == "func")
+            {
+                // Bind parameter names declared in 'func <name> <p1> <p2>...' to caller's argv values
+                for (int i = 2; i < counter && (i - 2) < curr_Fr.argc; i++)
+                {
+                    curr_Fr.argv[i - 2].name = tokens[i].text;
+                }
+                currentOffset = nextOffset;
+            }
+            else if (kw == "set")
             {
                 std::string var_name = tokens[1].text;
                 std::string valStr = tokens[2].text;
-
                 int32_t val = 0;
 
                 if (isdigit(valStr[0]) || (valStr[0] == '-' && valStr.length() > 1))
@@ -549,16 +504,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 else
                 {
-                    for (int i = 0; i < curr_Fr.localCount; i++)
-                    {
-                        if (curr_Fr.locals[i].name == valStr)
-                            val = curr_Fr.locals[i].value;
-                    }
-                    for (int i = 0; i < curr_Fr.argc; i++)
-                    {
-                        if (curr_Fr.argv[i].name == valStr)
-                            val = curr_Fr.argv[i].value;
-                    }
+                    val = getVariableValue(curr_Fr, valStr);
                 }
 
                 bool found = false;
@@ -597,25 +543,13 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
                 currentOffset = nextOffset;
             }
-           
             else if (kw == "add" || kw == "sub" || kw == "mul" || kw == "div")
             {
                 std::string get_var = tokens[1].text;
                 std::string valStr = tokens[2].text;
 
-                int32_t v1 = 0;
+                int32_t v1 = getVariableValue(curr_Fr, get_var);
                 int32_t v2 = 0;
-
-                for (int i = 0; i < curr_Fr.localCount; i++)
-                {
-                    if (curr_Fr.locals[i].name == get_var)
-                        v1 = curr_Fr.locals[i].value;
-                }
-                for (int i = 0; i < curr_Fr.argc; i++)
-                {
-                    if (curr_Fr.argv[i].name == get_var)
-                        v1 = curr_Fr.argv[i].value;
-                }
 
                 if (isdigit(valStr[0]) || (valStr[0] == '-' && valStr.length() > 1))
                 {
@@ -623,21 +557,12 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 }
                 else
                 {
-                    for (int i = 0; i < curr_Fr.localCount; i++)
-                    {
-                        if (curr_Fr.locals[i].name == valStr)
-                            v2 = curr_Fr.locals[i].value;
-                    }
-                    for (int i = 0; i < curr_Fr.argc; i++)
-                    {
-                        if (curr_Fr.argv[i].name == valStr)
-                            v2 = curr_Fr.argv[i].value;
-                    }
+                    v2 = getVariableValue(curr_Fr, valStr);
                 }
 
-                if (kw == "add") v1 = v1 + v2;
-                else if (kw == "sub") v1 = v1 - v2;
-                else if (kw == "mul") v1 = v1 * v2;
+                if (kw == "add") v1 += v2;
+                else if (kw == "sub") v1 -= v2;
+                else if (kw == "mul") v1 *= v2;
                 else if (kw == "div")
                 {
                     if (v2 == 0)
@@ -645,7 +570,7 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                         fclose(f);
                         throw std::runtime_error("Division by zero error");
                     }
-                    v1 = v1 / v2;
+                    v1 /= v2;
                 }
 
                 bool updated = false;
@@ -676,11 +601,6 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                     curr_Fr.locals[curr_Fr.localCount].value = v1;
                     curr_Fr.localCount++;
                 }
-                else if (!updated)
-                {
-                    fclose(f);
-                    throw std::out_of_range("Max limit reached for local variables in Frame");
-                }
 
                 currentOffset = nextOffset;
             }
@@ -699,19 +619,18 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                     std::string argName = tokens[i].text;
                     int32_t argVal = 0;
 
-                    for (int j = 0; j < curr_Fr.localCount; j++)
+                    if (isdigit(argName[0]) || (argName[0] == '-' && argName.length() > 1))
                     {
-                        if (curr_Fr.locals[j].name == argName)
-                            argVal = curr_Fr.locals[j].value;
+                        argVal = std::stoi(argName);
                     }
-                    for (int j = 0; j < curr_Fr.argc; j++)
+                    else
                     {
-                        if (curr_Fr.argv[j].name == argName)
-                            argVal = curr_Fr.argv[j].value;
+                        argVal = getVariableValue(curr_Fr, argName);
                     }
 
                     New_Fr.argv[New_Fr.argc].name = argName;
                     New_Fr.argv[New_Fr.argc].value = argVal;
+                    New_Fr.callerArgNames[New_Fr.argc] = argName;
                     New_Fr.argc++;
                 }
 
@@ -723,11 +642,28 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 Frame popped = staq.pop();
                 if (staq.isEmpty())
                 {
-                   
                     Snapshot* finalSnap = buildSnapshot(staq);
                     timeline.record(finalSnap);
                     break;
                 }
+
+                // Reflect updated parameter values back to caller's frame
+                Frame& callerFrame = staq.peek();
+                for (int i = 0; i < popped.argc; i++)
+                {
+                    std::string origVar = popped.callerArgNames[i];
+                    for (int j = 0; j < callerFrame.localCount; j++)
+                    {
+                        if (callerFrame.locals[j].name == origVar)
+                            callerFrame.locals[j].value = popped.argv[i].value;
+                    }
+                    for (int j = 0; j < callerFrame.argc; j++)
+                    {
+                        if (callerFrame.argv[j].name == origVar)
+                            callerFrame.argv[j].value = popped.argv[i].value;
+                    }
+                }
+
                 currentOffset = popped.returnLine;
             }
             else
@@ -735,13 +671,14 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                 currentOffset = nextOffset;
             }
         }
+
         Snapshot* snap = buildSnapshot(staq);
         timeline.record(snap);
     }
 
     fclose(f);
 }
-// PASS 0x3: SERIALIZE TIMELINE
+
 void writeString(FILE* f, const std::string& s)
 {
     int32_t n = static_cast<int32_t>(s.length());
@@ -777,31 +714,21 @@ void writeSnapshot(FILE* f, const Snapshot& s)
 
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
-   
     FILE* f = fopen(tdbgPath, "wb");
     if (!f)
         throw std::runtime_error("Failed to open tdbgPath for writing in writeTdbg");
 
     int32_t tot_step = timeline.getStepCount();
 
-   
     TTDBHeader header;
-    header.magic[0] = 'T';
-    header.magic[1] = 'T';
-    header.magic[2] = 'D';
-    header.magic[3] = 'B';
+    header.magic[0] = 'T'; header.magic[1] = 'T'; header.magic[2] = 'D'; header.magic[3] = 'B';
     header.version = 1;
     header.stepCount = tot_step;
     header.indexOffset = 0;
     writeHeader(f, header);
 
     int64_t* int_dexs = new int64_t[tot_step > 0 ? tot_step : 1];
-    TimelineNode* curr = nullptr;
-
-    if (tot_step > 0)
-    {
-        curr = timeline.begin();
-    }
+    TimelineNode* curr = (tot_step > 0) ? timeline.begin() : nullptr;
 
     int32_t dex = 0;
     while (curr != nullptr && dex < tot_step)
@@ -810,10 +737,10 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
 
         if (curr->data != nullptr)
         {
-           writeSnapshot(f, *curr->data);
+            writeSnapshot(f, *curr->data);
         }
 
-        dex = dex+1;
+        dex++;
         curr = curr->next;
     }
 
@@ -833,14 +760,10 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     delete[] int_dexs;
     fclose(f);
 }
-
-
 int32_t main()
 {
-
     if (!validateProgram("source.bin"))
     {
-        // send an error response instead of a .tdbg file
         return 1;
     }
 

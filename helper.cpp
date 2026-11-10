@@ -43,4 +43,18 @@ struct TTDBHeader
     int64_t indexOffset;
 };
 
-
+inline uint32_t computeCRC32(const char* data, size_t length, uint32_t crc = 0xFFFFFFFF)
+{
+    for (size_t i = 0; i < length; i++)
+    {
+        crc ^= static_cast<uint8_t>(data[i]);
+        for (int k = 0; k < 8; k++)
+        {
+            if (crc & 1)
+                crc = (crc >> 1) ^ 0xEDB88320U;
+            else
+                crc = crc >> 1;
+        }
+    }
+    return ~crc;
+}
