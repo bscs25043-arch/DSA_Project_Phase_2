@@ -159,9 +159,50 @@ void closeTdbg(TdbgReader &r)
     }
     r.index.clear();
 }
+string readBinaryString(FILE* f)
+{
+    int32_t len = 0;
+    if (fread(&len, sizeof(int32_t), 1, f) != 1) return "";
+    string s(len, '\0');
+    if (len > 0) fread(&s[0], 1, len, f);
+    return s;
+}
+
 Snapshot *readSnapshotAt(TdbgReader &r, int32_t step)
 {
+    if (step < 0 || step >= r.header.stepCount || !r.file) return nullptr;
+    
+    fseek(r.file, r.index[step], SEEK_SET);
 
+    Snapshot* s = new Snapshot();
+    if (fread(&s->stackDepth, sizeof(int32_t), 1, r.file) != 1)
+    {
+        delete s;
+        return nullptr;
+    }
+
+    for (int i = 0; i < s->stackDepth; i++)
+    {
+        Frame& fr = s->callStack[i];
+        fr.func_name = readBinaryString(r.file);
+
+        if (fread(&fr.argc, sizeof(int32_t), 1, r.file) != 1) { delete s; return nullptr; }
+        for (int a = 0; a < fr.argc; a++)
+        {
+            fr.argv[a].name = readBinaryString(r.file);
+            fread(&fr.argv[a].value, sizeof(int32_t), 1, r.file);
+        }
+
+        fread(&fr.returnLine, sizeof(int32_t), 1, r.file);
+
+        if (fread(&fr.localCount, sizeof(int32_t), 1, r.file) != 1) { delete s; return nullptr; }
+        for (int l = 0; l < fr.localCount; l++)
+        {
+            fr.locals[l].name = readBinaryString(r.file);
+            fread(&fr.locals[l].value, sizeof(int32_t), 1, r.file);
+        }
+    }
+    return s;
 }
 
 // =============================================================================================
@@ -171,12 +212,18 @@ Snapshot *readSnapshotAt(TdbgReader &r, int32_t step)
 
 void initSession(DebugSession &s)
 {
-   
+    s.active_flag = 0;
+    s.reader.file = nullptr;
+    s.currentStep = 0;
 }
+
 void closeSession(DebugSession &s)
 {
-    // If active, call closeTdbg(s.reader). Then set active = false.
-    // Called when the user types quit and when the input ends.
+    if (s.active_flag)
+    {
+        closeTdbg(s.reader);
+        s.active_flag = 0;
+    }
 }
 
 // =============================================================================================
