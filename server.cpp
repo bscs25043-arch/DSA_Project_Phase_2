@@ -16,10 +16,13 @@
 #include <cstdio>
 #include <exception>
 #include <stdexcept>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include "helper.cpp"
 
 // ---- Constants ----
-const int32_t MAX_VARS_PER_FRAME = 16;
-const int32_t MAX_STACK_DEPTH = 64;
 const int32_t MAX_FUNCS = 128;
 const int32_t MAX_TOKENS = MAX_VARS_PER_FRAME + 2;
 const int32_t IO_BUFFER_SIZE = 64 * 1024;
@@ -96,7 +99,6 @@ public:
     }
 };
 
-struct Snapshot;
 struct TimelineNode
 {
     Snapshot* data;
@@ -153,37 +155,6 @@ public:
     int32_t getStepCount() { return stepCount; }
 };
 
-struct Variable
-{
-    std::string name;
-    int32_t value;
-};
-
-struct Frame
-{
-    std::string func_name;
-    int32_t argc;
-    Variable argv[MAX_VARS_PER_FRAME];
-    int32_t returnLine;
-    Variable locals[MAX_VARS_PER_FRAME];
-    int32_t localCount;
-    std::string callerArgNames[MAX_VARS_PER_FRAME]; // Tracks caller variable names for reflection
-};
-
-struct Snapshot
-{
-    Frame callStack[MAX_STACK_DEPTH];
-    int32_t stackDepth;
-};
-
-struct TTDBHeader
-{
-    char magic[4];
-    int32_t version;
-    int32_t stepCount;
-    int64_t indexOffset;
-};
-
 void writeHeader(FILE* f, const TTDBHeader& h)
 {
     if (!f)
@@ -194,12 +165,6 @@ void writeHeader(FILE* f, const TTDBHeader& h)
     fwrite(&h.stepCount, sizeof(int32_t), 1, f);
     fwrite(&h.indexOffset, sizeof(int64_t), 1, f);
 }
-
-struct FuncEntry
-{
-    std::string funcName;
-    int64_t byteOffsetInResolveBin;
-};
 
 bool readSourceLine(std::ifstream& in, std::string& out)
 {
@@ -249,11 +214,11 @@ bool validateProgram(const char* sourcePath)
             std::string fn = secondWord(line);
             for (const auto& f : funcs)
             {
-                if (f == fn) return false; // Duplicate function check
+                if (f == fn) return false;
             }
             funcs.push_back(fn);
             groove++;
-            if (groove > 1) return false; // Reject nested functions
+            if (groove > 1) return false;
         }
         else if (kw == "func_end")
         {
@@ -319,7 +284,6 @@ int64_t resolveProgram(const char* sourcePath, const char* resolveBinPath)
     std::vector<int64_t> lineOffsets(lines.size(), 0);
     std::vector<std::string> patchedLines = lines;
 
-    // 2-Pass iterative offset alignment
     for (int iter = 0; iter < 2; iter++)
     {
         int64_t curr_Offset = 0;
@@ -485,7 +449,6 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
 
             if (kw == "func")
             {
-                // Bind parameter names declared in 'func <name> <p1> <p2>...' to caller's argv values
                 for (int i = 2; i < counter && (i - 2) < curr_Fr.argc; i++)
                 {
                     curr_Fr.argv[i - 2].name = tokens[i].text;
@@ -647,7 +610,6 @@ void executeProgram(const char* resolveBinPath, int64_t mainOffset, Timeline& ti
                     break;
                 }
 
-                // Reflect updated parameter values back to caller's frame
                 Frame& callerFrame = staq.peek();
                 for (int i = 0; i < popped.argc; i++)
                 {
@@ -761,40 +723,105 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     fclose(f);
 }
 
+void runSocketServer(int port)
+{
+    int listenSock = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenSock < 0) return;
+
+    int opt = 1;
+    setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+
+    if (bind(listenSock, (sockaddr*)&addr, sizeof(addr)) < 0 || listen(listenSock, 1) < 0)
+    {
+        close(listenSock);
+        return;
+    }
+
+    int clientSock = accept(listenSock, nullptr, nullptr);
+    close(listenSock);
+    if (clientSock < 0) return;
+
+    FILE* src = fopen("source.bin", "wb");
+    char buffer[IO_BUFFER_SIZE];
+    ssize_t bytesRead;
+    while ((bytesRead = recv(clientSock, buffer, sizeof(buffer), 0)) > 0)
+    {
+        fwrite(buffer, 1, bytesRead, src);
+    }
+    fclose(src);
+
+    std::string errorMsg = "";
+    bool success = false;
+
+    if (!validateProgram("source.bin"))
+    {
+        errorMsg = "Validation failed: unmatched func/func_end or nested functions";
+    }
+    else
+    {
+        try
+        {
+            int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
+            Timeline timeline;
+            executeProgram("resolve.bin", mainOffset, timeline);
+            writeTdbg(timeline, "session.tdbg");
+            success = true;
+        }
+        catch (const std::exception& ex)
+        {
+            errorMsg = ex.what();
+        }
+    }
+
+    std::vector<char> response;
+    if (success)
+    {
+        response.push_back(0); // Status 0 = Success
+        FILE* tdbg = fopen("session.tdbg", "rb");
+        if (tdbg)
+        {
+            size_t n;
+            while ((n = fread(buffer, 1, sizeof(buffer), tdbg)) > 0)
+            {
+                response.insert(response.end(), buffer, buffer + n);
+            }
+            fclose(tdbg);
+        }
+    }
+    else
+    {
+        response.push_back(1); // Status 1 = Error
+        response.insert(response.end(), errorMsg.begin(), errorMsg.end());
+    }
+
+    uint32_t crc = computeCRC32(response.data(), response.size());
+    char crcBuf[4];
+    memcpy(crcBuf, &crc, 4);
+    response.insert(response.end(), crcBuf, crcBuf + 4);
+
+    send(clientSock, response.data(), response.size(), 0);
+    close(clientSock);
+}
+
 int32_t main(int argc, char* argv[])
 {
+    if (argc > 1 && isdigit(argv[1][0]))
+    {
+        runSocketServer(std::stoi(argv[1]));
+        return 0;
+    }
+
     const char* sourceFile = (argc > 1) ? argv[1] : "source.bin";
-    const char* resolveFile = "resolve.bin";
-    const char* tdbgFile = "session.tdbg";
+    if (!validateProgram(sourceFile)) return 1;
 
-    std::cout << "[Server] Testing Pass 0x0: Validating " << sourceFile << "..." << std::endl;
-    if (!validateProgram(sourceFile))
-    {
-        std::cerr << "[Server Error] Validation failed (unmatched func/func_end or nested functions)." << std::endl;
-        return 1;
-    }
-    std::cout << "[Server] Pass 0x0 Passed." << std::endl;
-
-    try
-    {
-        std::cout << "[Server] Testing Pass 0x1: Resolving program offsets..." << std::endl;
-        int64_t mainOffset = resolveProgram(sourceFile, resolveFile);
-        std::cout << "[Server] Pass 0x1 Passed. 'main' offset at: " << mainOffset << " bytes." << std::endl;
-
-        std::cout << "[Server] Testing Pass 0x2: Executing timeline..." << std::endl;
-        Timeline timeline;
-        executeProgram(resolveFile, mainOffset, timeline);
-        std::cout << "[Server] Pass 0x2 Passed. Recorded " << timeline.getStepCount() << " steps." << std::endl;
-
-        std::cout << "[Server] Testing Pass 0x3: Serializing session to " << tdbgFile << "..." << std::endl;
-        writeTdbg(timeline, tdbgFile);
-        std::cout << "[Server] Pass 0x3 Passed. File successfully created." << std::endl;
-    }
-    catch (const std::exception& ex)
-    {
-        std::cerr << "[Server Pipeline Error] " << ex.what() << std::endl;
-        return 1;
-    }
-
+    int64_t mainOffset = resolveProgram(sourceFile, "resolve.bin");
+    Timeline timeline;
+    executeProgram("resolve.bin", mainOffset, timeline);
+    writeTdbg(timeline, "session.tdbg");
     return 0;
 }

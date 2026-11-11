@@ -335,65 +335,77 @@ void relayOneClient(ClientInfo &c)
 // PART 3: THE TWO THREADS
 // =============================================================================================
 
-
 void acceptLoop(int listenSock)
 {
-    // Repeat: accept() a new client. 
-    //  If pendingClients.size() is already MAX_PENDING_CLIENTS: unlock, sendError "server busy, try again later",
-    // else
-    // Lock queueMutex.
-    //   close the client, and go on.
-    //   Otherwise enqueue the client socket.
-    // Never wait for the server here, so new clients are always accepted quickly.
-    // If accept() fails, print the error and keep going (do not end the thread).
+    while (flag)
+    {
+        sockaddr_in clientAddr;
+        socklen_t addrLen = sizeof(clientAddr);
+        int clientSock = accept(listenSock, (sockaddr*)&clientAddr, &addrLen);
+        if (clientSock < 0) continue;
+
+        char ipStr[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &clientAddr.sin_addr, ipStr, sizeof(ipStr));
+
+        lock_guard<mutex> lock(queueMutex);
+        if (pendingClients.size() >= MAX_PENDING_CLIENTS)
+        {
+            sendError(clientSock, "server busy, try again later");
+            close(clientSock);
+        }
+        else
+        {
+            pendingClients.enqueue({clientSock, string(ipStr), ntohs(clientAddr.sin_port), time(nullptr)});
+        }
+    }
 }
+
 void dispatcherLoop()
 {
-    // This runs in the main thread and never ends.
-    // Repeat:
-    //   Lock queueMutex, take ONE client out of the queue if there is one, unlock.
-    //   If we got a client: call relayOneClient(). The next client is taken out of the queue only after this one is finished.
+    while (flag)
+    {
+        ClientInfo client{-1, "", 0, 0};
+        {
+            lock_guard<mutex> lock(queueMutex);
+            if (!pendingClients.isEmpty())
+            {
+                client = pendingClients.dequeue();
+            }
+        }
+
+        if (client.sock >= 0)
+        {
+            relayOneClient(client);
+        }
+        else
+        {
+            usleep(10000); 
+        }
+    }
 }
 
 void handler(int sg) {
     (void)sg;
     flag = 0;
 }
-//int main(int argc, char *argv[])
-//{
 
-   // signal(SIGINT, handler); // whenever ctrl+c will be pressed to exit the program the flag wll be set so insead of using infinite loop you can loop on flag to safely close things and exit
-    //// 2. listenSock = createListenSocket(LB_PORT).
-    // 3. Start a thread that runs acceptLoop(listenSock) and detach it.
-    // 4. Call dispatcherLoop().
-    //return 0;
-//}
 int main(int argc, char *argv[])
 {
-    (void)argc; (void)argv;
-    std::cout << "=== Testing Load Balancer Unit Logic ===" << std::endl;
+    if (argc > 1) serverHost = argv[1];
+    if (argc > 2) serverPort = atoi(argv[2]);
 
-    // 1. Test Queue Implementation
-    Queue<ClientInfo> testQueue;
-    testQueue.enqueue({1, "127.0.0.1", 5000, time(nullptr)});
-    testQueue.enqueue({2, "127.0.0.1", 5001, time(nullptr)});
+    signal(SIGINT, handler);
 
-    std::cout << "[LB Test] Queue Enqueue size: " << testQueue.size() << " (Expected: 2)" << std::endl;
-    ClientInfo dequeued = testQueue.dequeue();
-    std::cout << "[LB Test] Dequeued Socket ID: " << dequeued.sock << " (Expected: 1)" << std::endl;
+    cout << "[Load Balancer] Listening on port " << lbPort 
+         << ", targeting server on " << serverHost << ":" << serverPort << endl;
 
-    // 2. Test Backend Server Auto-Wakeup Logic
-    std::cout << "[LB Test] Attempting server connection/auto-wakeup..." << std::endl;
-    int sSock = connectToServerWithWakeup();
-    if (sSock >= 0)
-    {
-        std::cout << "[LB Test] Successfully connected to backend server on socket: " << sSock << std::endl;
-        close(sSock);
-    }
-    else
-    {
-        std::cout << "[LB Test Result] Backend server down or binary missing at " << SERVER_PATH << std::endl;
-    }
+    int listenSock = createListenSocket(lbPort);
 
+    thread acceptor(acceptLoop, listenSock);
+    acceptor.detach();
+
+    dispatcherLoop();
+
+    close(listenSock);
     return 0;
 }
